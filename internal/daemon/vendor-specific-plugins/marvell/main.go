@@ -28,20 +28,21 @@ import (
 )
 
 const (
-	SysBusPci     string = "/sys/bus/pci/devices"
-	VendorID      string = "177d"
-	DPUdeviceID   string = "a0f7"
-	HostDeviceID  string = "b900"
-	DefaultPort   int32  = 8085
-	Version       string = "0.0.1"
-	PortType      string = "veth"
-	NoOfPortPairs int    = 2
-	IPv6AddrDpu   string = "fe80::1"
-	IPv6AddrHost  string = "fe80::2"
-	DataPlaneType string = "debug"
-	NumPFs        int    = 1
-	PFID          int    = 0
-	isDPDK        bool   = false
+	SysBusPci      string = "/sys/bus/pci/devices"
+	VendorID       string = "177d"
+	DPUdeviceID    string = "a0f7"
+	HostDeviceID   string = "b900"
+	DefaultPort    int32  = 8085
+	Version        string = "0.0.1"
+	PortType       string = "veth"
+	NoOfPortPairs  int    = 2
+	IPv6AddrDpu    string = "fe80::1"
+	IPv6AddrHost   string = "fe80::2"
+	DataPlaneType  string = "debug"
+	NumPFs         int    = 1
+	PFID           int    = 0
+	isDPDK         bool   = false
+	HostVFDeviceID string = "b903"
 )
 
 // multiple dataplane can be added using mrvldp interface functions
@@ -53,10 +54,11 @@ type mrvldp interface {
 	DeleteDataplane(bridgeName string) error
 }
 type mrvlDeviceInfo struct {
-	nfInterfaceName string
-	dpInterfaceName string
-	dpMAC           string
-	health          string
+	secInterfaceName string
+	dpInterfaceName  string
+	dpMAC            string
+	portType         string
+	health           string
 }
 type mrvlVspServer struct {
 	pb.UnimplementedLifeCycleServiceServer
@@ -72,27 +74,27 @@ type mrvlVspServer struct {
 	version       string
 	isDPUMode     bool
 	deviceStore   map[string]mrvlDeviceInfo
-	portType      string
 	noOfPortPairs int
+	portType      string
 	bridgeName    string
 	mrvlDP        mrvldp
 }
 
 // createVethPair function to create a veth pair with the given index and InterfaceInfo
 func (vsp *mrvlVspServer) createVethPair(index int) error {
-	//nfInterfaceName is the name of the interface on the Network Function side
+	//secInterfaceName is the name of the interface on the Network Function side
 	//dpInterfaceName is the name of the interface on the Data Plane side
-	nfInterfaceName := fmt.Sprintf("nf_interface%d", index)
+	secInterfaceName := fmt.Sprintf("nf_interface%d", index)
 	dpInterfaceName := fmt.Sprintf("dp_interface%d", index)
 	vethLink := &netlink.Veth{
-		LinkAttrs: netlink.LinkAttrs{Name: nfInterfaceName},
+		LinkAttrs: netlink.LinkAttrs{Name: secInterfaceName},
 		PeerName:  dpInterfaceName,
 	}
 	if err := netlink.LinkAdd(vethLink); err != nil {
 		return err
 	}
 
-	nfLink, err := netlink.LinkByName(nfInterfaceName)
+	nfLink, err := netlink.LinkByName(secInterfaceName)
 	if err != nil {
 		return err
 	}
@@ -109,10 +111,11 @@ func (vsp *mrvlVspServer) createVethPair(index int) error {
 	}
 
 	vsp.deviceStore[nfLink.Attrs().HardwareAddr.String()] = mrvlDeviceInfo{
-		nfInterfaceName: nfInterfaceName,
-		dpInterfaceName: dpInterfaceName,
-		dpMAC:           peerLink.Attrs().HardwareAddr.String(),
-		health:          "Healthy",
+		secInterfaceName: secInterfaceName,
+		dpInterfaceName:  dpInterfaceName,
+		dpMAC:            peerLink.Attrs().HardwareAddr.String(),
+		health:           "Healthy",
+		portType:         "veth",
 	}
 	return nil
 }
@@ -130,7 +133,7 @@ func (vsp *mrvlVspServer) CleanVethPairs() error {
 		deviceStore := vsp.deviceStore
 		vsp.deviceStore = nil
 		for _, mrvlDeviceInfo := range deviceStore {
-			nfLink, err := netlink.LinkByName(mrvlDeviceInfo.nfInterfaceName)
+			nfLink, err := netlink.LinkByName(mrvlDeviceInfo.secInterfaceName)
 			if err != nil {
 				klog.Errorf("Error occurred in getting Link By Name: %v", err)
 				errResult = errors.Join(errResult, err)
@@ -141,7 +144,7 @@ func (vsp *mrvlVspServer) CleanVethPairs() error {
 				errResult = errors.Join(errResult, err)
 				continue
 			}
-			klog.Infof("Deleted Veth Pair: %s", mrvlDeviceInfo.nfInterfaceName)
+			klog.Infof("Deleted Veth Pair: %s", mrvlDeviceInfo.secInterfaceName)
 		}
 	}
 	return errResult
@@ -174,16 +177,26 @@ func (vsp *mrvlVspServer) ConfigureNetworkInterface() error {
 		return errors.New("invalid Port Type")
 	}
 	for nfMacAddress, mrvlDeviceInfo := range vsp.deviceStore {
-		klog.Infof("nfMacAddress: %s, nfInterfaceName: %s, dpInterfaceName: %s, dpMacAddress: %s, health: %s", nfMacAddress, mrvlDeviceInfo.nfInterfaceName, mrvlDeviceInfo.dpInterfaceName, mrvlDeviceInfo.dpMAC, mrvlDeviceInfo.health)
+		klog.Infof("nfMacAddress: %s, secInterfaceName: %s, dpInterfaceName: %s, dpMacAddress: %s, health: %s", nfMacAddress, mrvlDeviceInfo.secInterfaceName, mrvlDeviceInfo.dpInterfaceName, mrvlDeviceInfo.dpMAC, mrvlDeviceInfo.health)
 	}
 	return nil
 }
 
-// GetDeviceHealth function to get the health of the device based on the given nfInterfaceName
-func (vsp *mrvlVspServer) GetDeviceHealth(nfInterfaceName string) string {
+// GetDeviceHealth function to get the health of the device based on the given secInterfaceName
+func (vsp *mrvlVspServer) GetDeviceHealth(secInterfaceName string) string {
 	switch vsp.portType {
 	case "veth":
-		nfLink, err := netlink.LinkByName(nfInterfaceName)
+		nfLink, err := netlink.LinkByName(secInterfaceName)
+		if err != nil {
+			return "Unhealthy"
+		}
+		//check if the interface is up =0 means interface is down
+		if nfLink.Attrs().Flags&net.FlagUp == 0 {
+			return "Unhealthy"
+		}
+		return "Healthy"
+	case "sriov":
+		nfLink, err := netlink.LinkByName(secInterfaceName)
 		if err != nil {
 			return "Unhealthy"
 		}
@@ -223,6 +236,19 @@ func (vsp *mrvlVspServer) Init(ctx context.Context, in *pb.InitRequest) (*pb.IpP
 			return &pb.IpPort{}, err
 		}
 
+	} else {
+		vsp.portType = "sriov"
+		VfNames, err := mrvlutils.GetAllVfsByDeviceID(HostVFDeviceID)
+		if err != nil {
+			return nil, err
+		}
+		for _, vfName := range VfNames {
+			vsp.deviceStore[vfName] = mrvlDeviceInfo{
+				secInterfaceName: vfName,
+				health:           "Healthy",
+				portType:         "sriov",
+			}
+		}
 	}
 	return &pb.IpPort{
 		Ip:   ipPort.Ip,
@@ -349,9 +375,9 @@ func (vsp *mrvlVspServer) GetDevices(ctx context.Context, in *pb.Empty) (*pb.Dev
 		return nil, errors.New("device Store is empty")
 	}
 	for _, mrvlDeviceInfo := range vsp.deviceStore {
-		health := vsp.GetDeviceHealth(mrvlDeviceInfo.nfInterfaceName)
-		devices[mrvlDeviceInfo.nfInterfaceName] = &pb.Device{
-			ID:     mrvlDeviceInfo.nfInterfaceName,
+		health := vsp.GetDeviceHealth(mrvlDeviceInfo.secInterfaceName)
+		devices[mrvlDeviceInfo.secInterfaceName] = &pb.Device{
+			ID:     mrvlDeviceInfo.secInterfaceName,
 			Health: health,
 		}
 	}
